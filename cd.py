@@ -31,51 +31,51 @@ chem_col = 'ChemicalID'
 dis_col = 'DiseaseID'
 
 
-#%%
-''' all disease '''
-# mapping of unique chemical, disease, and gene
-uniq_chem = chem_dis_tmp[chem_col].unique()
-chem_map = {name: i for i, name in enumerate(uniq_chem)}
+# #%%
+# ''' all disease '''
+# # mapping of unique chemical, disease, and gene
+# uniq_chem = chem_dis_tmp[chem_col].unique()
+# chem_map = {name: i for i, name in enumerate(uniq_chem)}
 
-uniq_dis = chem_dis_tmp[dis_col].unique()
-dis_map = {name: i for i, name in enumerate(uniq_dis)}
-
-
-# direct edge index between chem-disease
-direct_chem_dis_idx = chem_dis_tmp.DirectEvidence == 'marker/mechanism'
-direct_chem_dis = chem_dis_tmp[direct_chem_dis_idx][[chem_col, dis_col]]
-assert direct_chem_dis.duplicated().sum() == 0
-
-# inferenced relationship between chem-disease
-curated_chem_dis_idx = chem_dis_tmp.DirectEvidence.isna()
-curated_chem_dis = chem_dis_tmp[curated_chem_dis_idx][[chem_col, dis_col]]
-curated_chem_dis = curated_chem_dis.drop_duplicates([chem_col, dis_col])
-
-# drop the duplicated pair of chem-disease have direct evidence and inference score
-dup_chem_idx = curated_chem_dis[chem_col].isin(direct_chem_dis[chem_col])
-dup_dis_idx = curated_chem_dis[dis_col].isin(direct_chem_dis[dis_col])
-curated_chem_dis = curated_chem_dis[~(dup_chem_idx & dup_dis_idx)]
-
-# mapping the chemical and disease id
-direct_chem_dis[chem_col] = direct_chem_dis[chem_col].apply(lambda x: chem_map[x])
-direct_chem_dis[dis_col] = direct_chem_dis[dis_col].apply(lambda x: dis_map[x])
-
-curated_chem_dis[chem_col] = curated_chem_dis[chem_col].apply(lambda x: chem_map[x])
-curated_chem_dis[dis_col] = curated_chem_dis[dis_col].apply(lambda x: dis_map[x])
+# uniq_dis = chem_dis_tmp[dis_col].unique()
+# dis_map = {name: i for i, name in enumerate(uniq_dis)}
 
 
-#%%
-# create heterogeneous graph
-data = HeteroData()
+# # direct edge index between chem-disease
+# direct_chem_dis_idx = chem_dis_tmp.DirectEvidence == 'marker/mechanism'
+# direct_chem_dis = chem_dis_tmp[direct_chem_dis_idx][[chem_col, dis_col]]
+# assert direct_chem_dis.duplicated().sum() == 0
 
-data['chemical'].id = torch.tensor(list(chem_map.values()))
-data['chemical'].x = torch.tensor(list(chem_map.values()))
-data['disease'].id = torch.tensor(list(dis_map.values()))
-data['disease'].x = torch.tensor(list(dis_map.values()))
+# # inferenced relationship between chem-disease
+# curated_chem_dis_idx = chem_dis_tmp.DirectEvidence.isna()
+# curated_chem_dis = chem_dis_tmp[curated_chem_dis_idx][[chem_col, dis_col]]
+# curated_chem_dis = curated_chem_dis.drop_duplicates([chem_col, dis_col])
 
-data['chemical', 'cause', 'disease'].edge_index = torch.from_numpy(direct_chem_dis.values.T).to(torch.long)
-data['chemical', 'relate', 'disease'].edge_index = torch.from_numpy(curated_chem_dis.values.T).to(torch.long)
-data['disease', 'rev_relate', 'chemical'].edge_index = torch.from_numpy(curated_chem_dis.values.T[[1, 0], :]).to(torch.long)
+# # drop the duplicated pair of chem-disease have direct evidence and inference score
+# dup_chem_idx = curated_chem_dis[chem_col].isin(direct_chem_dis[chem_col])
+# dup_dis_idx = curated_chem_dis[dis_col].isin(direct_chem_dis[dis_col])
+# curated_chem_dis = curated_chem_dis[~(dup_chem_idx & dup_dis_idx)]
+
+# # mapping the chemical and disease id
+# direct_chem_dis[chem_col] = direct_chem_dis[chem_col].apply(lambda x: chem_map[x])
+# direct_chem_dis[dis_col] = direct_chem_dis[dis_col].apply(lambda x: dis_map[x])
+
+# curated_chem_dis[chem_col] = curated_chem_dis[chem_col].apply(lambda x: chem_map[x])
+# curated_chem_dis[dis_col] = curated_chem_dis[dis_col].apply(lambda x: dis_map[x])
+
+
+# #%%
+# # create heterogeneous graph
+# data = HeteroData()
+
+# data['chemical'].id = torch.tensor(list(chem_map.values()))
+# data['chemical'].x = torch.tensor(list(chem_map.values()))
+# data['disease'].id = torch.tensor(list(dis_map.values()))
+# data['disease'].x = torch.tensor(list(dis_map.values()))
+
+# data['chemical', 'cause', 'disease'].edge_index = torch.from_numpy(direct_chem_dis.values.T).to(torch.long)
+# data['chemical', 'relate', 'disease'].edge_index = torch.from_numpy(curated_chem_dis.values.T).to(torch.long)
+# data['disease', 'rev_relate', 'chemical'].edge_index = torch.from_numpy(curated_chem_dis.values.T[[1, 0], :]).to(torch.long)
 
 
 #%%
@@ -319,6 +319,21 @@ plt.show()
 plt.close()
 
 
+#%%
+from torch_geometric.utils import degree
+
+dis_map
+
+plt.hist(degree(data['chemical', 'cause', 'disease'].edge_index[0, :]))
+plt.show()
+plt.close()
+
+degree(data['chemical', 'cause', 'disease'].edge_index[1, :])
+degree(train_data['chemical', 'cause', 'disease'].edge_index[1, :])
+degree(valid_data['chemical', 'cause', 'disease'].edge_index[1, :])
+degree(test_data['chemical', 'cause', 'disease'].edge_index[1, :])
+
+chem_dis_tmp[chem_dis_tmp.DiseaseID == 'MESH:D001249']
 
 
 

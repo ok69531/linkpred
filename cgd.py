@@ -12,10 +12,21 @@ from torch.utils.data import DataLoader
 
 import torch_geometric
 from torch_geometric.nn import RGCNConv
+from torch_geometric.utils import degree
 from torch_geometric.data import Data, HeteroData
-from torch_geometric.transforms import RandomLinkSplit
+from torch_geometric.transforms import ToUndirected, RandomLinkSplit
+
+from copy import deepcopy
+from collections import defaultdict
+from sklearn.metrics import roc_auc_score
+import matplotlib.pyplot as plt
+
 
 from torch_geometric.utils import k_hop_subgraph
+
+
+#%%
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 #%%
@@ -57,11 +68,21 @@ del gene_dis_tmp
 uniq_chem = pd.concat([target_chem_dis[chem_col], chem_gene_tmp[chem_col]]).unique()
 chem_map = {name: i for i, name in enumerate(uniq_chem)}
 
+uniq_gene = pd.concat([target_gene_dis[gene_col], chem_gene_tmp[gene_col]]).unique()
+gene_map = {str(name): i for i, name in enumerate(uniq_gene)}
+
 uniq_dis = pd.concat([target_chem_dis[dis_col], target_gene_dis[dis_col]]).unique()
 dis_map = {name: i for i, name in enumerate(uniq_dis)}
 
-uniq_gene = pd.concat([target_gene_dis[gene_col], chem_gene_tmp[gene_col]]).unique()
-gene_map = {str(name): i for i, name in enumerate(uniq_gene)}
+
+# uniq_chem = pd.concat([target_chem_dis[chem_col], chem_gene_tmp[chem_col]]).unique()
+# chem_map = {name: i for i, name in enumerate(uniq_chem)}
+
+# uniq_gene = pd.concat([target_gene_dis[gene_col], chem_gene_tmp[gene_col]]).unique()
+# gene_map = {str(name): i+len(chem_map) for i, name in enumerate(uniq_gene)}
+
+# uniq_dis = pd.concat([target_chem_dis[dis_col], target_gene_dis[dis_col]]).unique()
+# dis_map = {name: i+len(chem_map)+len(gene_map) for i, name in enumerate(uniq_dis)}
 
 
 #%%
@@ -142,6 +163,126 @@ hetero_data['disease', 'rev_relate', 'gene'].edge_index = torch.from_numpy(curat
 hetero_data['chemical', 'relate', 'gene'].edge_index = torch.from_numpy(curated_chem_gene.values.T).to(torch.long)
 hetero_data['gene', 'rev_relate', 'chemical'].edge_index = torch.from_numpy(curated_chem_gene.values.T[[1, 0], :]).to(torch.long)
 
+# torch.save(hetero_data, 'dataset/ctd_graph_tmp.pt')
+
+
+#%%
+# hetero_data = HeteroData()
+
+# hetero_data['chemical'].nx_id = torch.tensor(list(chem_map.values()))
+# hetero_data['gene'].nx_id = torch.tensor(list(gene_map.values()))
+# hetero_data['disease'].nx_id = torch.tensor(list(dis_map.values()))
+
+# hetero_data['chemical', 'chem_cause_dis', 'disease'].edge_index = torch.from_numpy(direct_chem_dis.values.T).to(torch.long)
+# hetero_data['chemical', 'chem_relate_dis', 'disease'].edge_index = torch.from_numpy(curated_chem_dis.values.T).to(torch.long)
+# hetero_data['disease', 'dis_rev_relate_chem', 'chemical'].edge_index = torch.from_numpy(curated_chem_dis.values.T[[1, 0], :]).to(torch.long)
+# hetero_data['gene', 'gene_cause_dis', 'disease'].edge_index = torch.from_numpy(direct_gene_dis.values.T).to(torch.long)
+# hetero_data['gene', 'gene_relate_dis', 'disease'].edge_index = torch.from_numpy(curated_gene_dis.values.T).to(torch.long)
+# hetero_data['disease', 'dis_rev_relate_gene', 'gene'].edge_index = torch.from_numpy(curated_gene_dis.values.T[[1, 0], :]).to(torch.long)
+# hetero_data['chemical', 'chem_relate_gene', 'gene'].edge_index = torch.from_numpy(curated_chem_gene.values.T).to(torch.long)
+# hetero_data['gene', 'gene_rev_relate_chem', 'chemical'].edge_index = torch.from_numpy(curated_chem_gene.values.T[[1, 0], :]).to(torch.long)
+
+
+# hetero_data['chemical', 'chem_cause_dis', 'disease'].count = torch.ones(len(direct_chem_dis.values)).to(torch.long)
+# hetero_data['chemical', 'chem_relate_dis', 'disease'].count = torch.ones(len(curated_chem_dis.values)).to(torch.long)
+# hetero_data['disease', 'dis_rev_relate_chem', 'chemical'].count = torch.ones(len(curated_chem_dis.values)).to(torch.long)
+# hetero_data['gene', 'gene_cause_dis', 'disease'].count = torch.ones(len(direct_gene_dis.values)).to(torch.long)
+# hetero_data['gene', 'gene_relate_dis', 'disease'].count = torch.ones(len(curated_gene_dis.values)).to(torch.long)
+# hetero_data['disease', 'dis_rev_relate_gene', 'gene'].count = torch.ones(len(curated_gene_dis.values)).to(torch.long)
+# hetero_data['chemical', 'chem_relate_gene', 'gene'].count = torch.ones(len(curated_chem_gene.values)).to(torch.long)
+# hetero_data['gene', 'gene_rev_relate_chem', 'chemical'].count = torch.ones(len(curated_chem_gene.values)).to(torch.long)
+
+
+# #%%
+# def to_dgl(data):
+#     r"""Converts a :class:`torch_geometric.data.Data` or
+#     :class:`torch_geometric.data.HeteroData` instance to a :obj:`dgl` graph
+#     object.
+
+#     Args:
+#         data (torch_geometric.data.Data or torch_geometric.data.HeteroData):
+#             The data object.
+
+#     Example:
+#         >>> edge_index = torch.tensor([[0, 1, 1, 2, 3, 0], [1, 0, 2, 1, 4, 4]])
+#         >>> x = torch.randn(5, 3)
+#         >>> edge_attr = torch.randn(6, 2)
+#         >>> data = Data(x=x, edge_index=edge_index, edge_attr=y)
+#         >>> g = to_dgl(data)
+#         >>> g
+#         Graph(num_nodes=5, num_edges=6,
+#             ndata_schemes={'x': Scheme(shape=(3,))}
+#             edata_schemes={'edge_attr': Scheme(shape=(2, ))})
+
+#         >>> data = HeteroData()
+#         >>> data['paper'].x = torch.randn(5, 3)
+#         >>> data['author'].x = torch.ones(5, 3)
+#         >>> edge_index = torch.tensor([[0, 1, 2, 3, 4], [0, 1, 2, 3, 4]])
+#         >>> data['author', 'cites', 'paper'].edge_index = edge_index
+#         >>> g = to_dgl(data)
+#         >>> g
+#         Graph(num_nodes={'author': 5, 'paper': 5},
+#             num_edges={('author', 'cites', 'paper'): 5},
+#             metagraph=[('author', 'paper', 'cites')])
+#     """
+#     import dgl
+
+#     from torch_geometric.data import Data, HeteroData
+
+#     if isinstance(data, Data):
+#         if data.edge_index is not None:
+#             row, col = data.edge_index
+#         else:
+#             row, col, _ = data.adj_t.t().coo()
+
+#         g = dgl.graph((row, col))
+
+#         for attr in data.node_attrs():
+#             g.ndata[attr] = data[attr]
+#         for attr in data.edge_attrs():
+#             if attr in ['edge_index', 'adj_t']:
+#                 continue
+#             g.edata[attr] = data[attr]
+
+#         return g
+
+#     if isinstance(data, HeteroData):
+#         data_dict = {}
+#         for edge_type, edge_store in data.edge_items():
+#             if edge_store.get('edge_index') is not None:
+#                 row, col = edge_store.edge_index
+#             else:
+#                 row, col, _ = edge_store['adj_t'].t().coo()
+
+#             data_dict[edge_type] = (row, col)
+
+#         g = dgl.heterograph(data_dict)
+
+#         for node_type, node_store in data.node_items():
+#             for attr, value in node_store.items():
+#                 g.nodes[node_type].data[attr] = value
+
+#         for edge_type, edge_store in data.edge_items():
+#             for attr, value in edge_store.items():
+#                 if attr in ['edge_index', 'adj_t']:
+#                     continue
+#                 g.edges[edge_type].data[attr] = value
+
+#         return g
+
+#     raise ValueError(f"Invalid data type (got '{type(data)}')")
+
+
+# #%%
+# import dgl
+# a = to_dgl(hetero_data)
+
+# a.nodes['chemical']
+# a.nodes['gene']
+# a.nodes['disease']
+# a.edges[('chemical', 'chem_cause_dis', 'disease')]
+# dgl.save_graphs('page-link/datasets/ctd', a)
+
 
 #%%
 def convert_hetero_object_to_RGCN(heteroData, edge_types):
@@ -165,17 +306,17 @@ def convert_hetero_object_to_RGCN(heteroData, edge_types):
         data_edge_index = torch.cat([data_edge_index,ourV],dim = -1)
         data_edge_types = torch.cat([data_edge_types, torch.zeros(len(ourV[0])) + edge_types.index(key)])
     
-    dataRGCN.edge_index = data_edge_index
-    dataRGCN.x = datax
+    dataRGCN.edge_index = data_edge_index.to(torch.long)
+    dataRGCN.x = datax.to(torch.long)
     
     edge_label_index =torch.tensor( heteroData["chemical","cause","disease"].edge_label_index.cpu().numpy())
     edge_label_index[1,:] += (len(heteroData["chemical"].x) + len(heteroData["gene"].x)  )
     edge_label = torch.tensor(heteroData["chemical","cause","disease"].edge_label.cpu().numpy())
-    target_label_type = torch.zeros(len(edge_label)) + data.edge_types.index(("chemical","cause","disease"))
+    target_label_type = torch.zeros(len(edge_label)) + heteroData.edge_types.index(("chemical","cause","disease"))
     dataRGCN.edge_label_index = edge_label_index
     dataRGCN.edge_label = edge_label
-    dataRGCN.edge_type = data_edge_types
-    dataRGCN.label_edge_type = target_label_type
+    dataRGCN.edge_type = data_edge_types.to(torch.long)
+    dataRGCN.label_edge_type = target_label_type.to(torch.long)
     return  dataRGCN
 
 
@@ -204,14 +345,6 @@ class RGCNEncoder(nn.Module):
         return x
 
 
-a = RGCNEncoder(num_nodes, len(data.edge_types), num_layers = 2, emb_dim = 32)
-embedding = a(rgcn_test.x.long(), rgcn_test.edge_index.long(), rgcn_test.edge_type.long())
-
-src, dst = rgcn_test.edge_label_index
-
-rgcn_test.label_edge_type
-
-
 class DistMult(nn.Module):
     def __init__(self, num_relations, emb_dim):
         super(DistMult, self).__init__()
@@ -222,19 +355,6 @@ class DistMult(nn.Module):
         relation_embedding = self.relation_embedding(edge_type)
         score = torch.sum(x_i * relation_embedding * x_j, dim = -1)
         return score
-
-
-distmult = DistMult(9, 32)
-pred = distmult(embedding[src], embedding[dst], rgcn_test.label_edge_type.long())
-
-pos_idx = rgcn_test.edge_label == 1
-neg_idx = rgcn_test.edge_label == 0
-
-pos_score = pred[pos_idx]
-neg_score = pred[neg_idx]
-
-
-nn.functional.margin_ranking_loss(pos_score, neg_score,target=torch.ones_like(pos_score))
 
 
 class TransE(nn.Module):
@@ -248,18 +368,15 @@ class TransE(nn.Module):
         
         return score
 
-transe = TransE(9, 32)
-transe(embedding[src], embedding[dst], rgcn_test.label_edge_type.long())
-
 
 class MultiLayerPerceptron(nn.Module):
-    def __init__(self, emb_dim, out_channels, num_layers, dropout):
+    def __init__(self, emb_dim, out_dim, num_layers, dropout):
         super(MultiLayerPerceptron, self).__init__()
         
         self.lins = nn.ModuleList()
         for _ in range(num_layers - 1):
             self.lins.append(nn.Linear(emb_dim, emb_dim))
-        self.lins.append(nn.Linear(emb_dim, out_channels))
+        self.lins.append(nn.Linear(emb_dim, out_dim))
         
         self.dropout = dropout
     
@@ -279,228 +396,172 @@ class MultiLayerPerceptron(nn.Module):
 
 
 class LinkPredictor(nn.Module):
-
-
-#%%
-def train(models, optimizer, criterion, data, batch_size):
-    node_embed, gnn, predictor = models
-    
-    node_embed.train()
-    gnn.train()
-    predictor.train()
-    
-    total_loss, total_examples = 0, 0
-    for perm in DataLoader(
-        range(data.edge_label_index_dict[('chemical', 'cause', 'disease')].size(1)), 
-        batch_size = batch_size,
-        shuffle = True):
+    def __init__(self, model_name, num_relations, emb_dim, out_dim, num_layers, dropout):
+        super(LinkPredictor, self).__init__()
         
-        optimizer.zero_grad()
+        if model_name not in ['transe', 'distmult', 'mlp']:
+            raise ValueError(f'model {model_name} not supported')
         
-        node_embedding = node_embed(data['chemical'].id, data['disease'].id, data['gene'].id)
-        node_embedding = gnn(node_embedding, data.edge_index_dict, data.edge_types)
+        if model_name == 'transe':
+            self.decoder = TransE(num_relations, emb_dim)
+        elif model_name == 'distmult':
+            self.decoder = DistMult(num_relations, emb_dim)
+        elif model_name == 'mlp':
+            self.decoder = MultiLayerPerceptron(emb_dim, out_dim, num_layers, dropout)
         
-        src, dst = data.edge_label_index_dict[('chemical', 'cause', 'disease')][:, perm]
+        self.model_name = model_name
         
-        pred = predictor(node_embedding['chemical'][src], node_embedding['disease'][dst])
-        target = data[('chemical', 'cause', 'disease')].edge_label[perm]
+    def forward(self, x_i, x_j, edge_type = None):
+        if self.model_name == 'mlp':
+            score = self.decoder(x_i, x_j)
+        else:
+            score = self.decoder(x_i, x_j, edge_type)
         
-        loss = criterion(pred, target.view(pred.shape))
-        loss.backward()
-        optimizer.step()
+        return score
+
+
+def nsloss(pred, target):
+    pos_idx = target == 1
+    neg_idx = target == 0
+    
+    positive_score = nn.functional.logsigmoid(pred[pos_idx])
+    positive_score = -positive_score.mean()
+    negative_score = nn.functional.logsigmoid(-pred[neg_idx])
+    negative_score = -negative_score.mean()
+    
+    loss = (positive_score + negative_score) / 2
+    
+    return loss
+
+
+# #%%
+# def train(models, optimizer, data):
+#     rgcn, predictor = models
+    
+#     rgcn.train()
+#     predictor.train()
         
-        total_loss += float(loss.detach()) * pred.numel()
-        total_examples += pred.numel()
+#     optimizer.zero_grad()
     
-    return total_loss/total_examples
-
-
-@torch.no_grad()
-def evaluation(models, criterion, data):
-    node_embed, gnn, predictor = models
+#     node_embedding = rgcn(data.x, data.edge_index, data.edge_type) 
+#     src, dst = data.edge_label_index
     
-    node_embed.eval()
-    gnn.eval()
-    predictor.eval()
+#     pred = predictor(node_embedding[src], node_embedding[dst], data.label_edge_type)
+#     target = data.edge_label
     
-    src, dst = data.edge_label_index_dict[('chemical', 'cause', 'disease')]
+#     loss = nsloss(pred, target)
+#     loss.backward()
+#     optimizer.step()
     
-    node_embedding = node_embed(data['chemical'].id, data['disease'].id)
-    node_embedding = gnn(node_embedding, data.edge_index_dict)
+#     return loss
+
+
+# @torch.no_grad()
+# def evaluation(models, data):
+#     rgcn, predictor = models
     
-    pred = predictor(node_embedding['chemical'][src], node_embedding['disease'][dst])
-    target = data[('chemical', 'cause', 'disease')].edge_label
+#     rgcn.eval()
+#     predictor.eval()
     
-    loss = criterion(pred, target.view(pred.shape))
-    auc = roc_auc_score(target.cpu().numpy(), pred.detach().cpu().numpy())
+#     src, dst = data.edge_label_index
     
-    return loss, auc
+#     node_embedding = rgcn(data.x, data.edge_index, data.edge_type) 
+#     pred = predictor(node_embedding[src], node_embedding[dst], data.label_edge_type)
+#     target = data.edge_label
+    
+#     loss = nsloss(pred, target)
+#     auc = roc_auc_score(target.cpu().numpy(), pred.detach().cpu().numpy())
+    
+#     return loss, auc
 
 
+# #%%
+# seed = 0
+
+# torch.manual_seed(seed)
+# torch_geometric.seed_everything(seed)
+
+# data_split = RandomLinkSplit(
+#     num_val = 0.1, 
+#     num_test = 0.1,
+#     is_undirected = False,
+#     disjoint_train_ratio = 0.3,
+#     neg_sampling_ratio = 1.0,
+#     add_negative_train_samples = True,
+#     edge_types = ('chemical', 'cause', 'disease')
+# )
+
+# train_data, valid_data, test_data = data_split(hetero_data)
+
+# # rgcn_train = train_data.to_homogeneous()
+# # rgcn_valid = valid_data.to_homogeneous()
+# # rgcn_test = test_data.to_homogeneous()
+# rgcn_train = convert_hetero_object_to_RGCN(train_data, hetero_data.edge_types)
+# rgcn_valid = convert_hetero_object_to_RGCN(valid_data, hetero_data.edge_types)
+# rgcn_test = convert_hetero_object_to_RGCN(test_data, hetero_data.edge_types)
 
 
-
-#%%
-seed = 0
-
-torch.manual_seed(seed)
-torch_geometric.seed_everything(seed)
-
-data_split = RandomLinkSplit(
-    num_val = 0.1, 
-    num_test = 0.01,
-    is_undirected = False,
-    disjoint_train_ratio = 0.,
-    # disjoint_train_ratio = 0.3,
-    neg_sampling_ratio = 1.0,
-    add_negative_train_samples = True,
-    edge_types = ('chemical', 'cause', 'disease')
-)
-
-train_data, valid_data, test_data = data_split(hetero_data)
-
-rgcn_train = convert_hetero_object_to_RGCN(train_data, hetero_data.edge_types)
-rgcn_valid = convert_hetero_object_to_RGCN(valid_data, hetero_data.edge_types)
-rgcn_test = convert_hetero_object_to_RGCN(test_data, hetero_data.edge_types)
+# num_layer = 3
+# out_dim = 1
+# dropout = 0
+# emb_dim = 300
+# num_blocks = 5
+# num_nodes = len(rgcn_train.x)
+# num_relations = len(hetero_data.edge_index_dict)
 
 
-hidden_channels = 10
-out_channels = 1
-num_layer = 3
-dropout = 0
-batch_size = 512
-num_relations = len(data.edge_index_dict)
-num_blocks = 5
-num_nodes = len(rgcn_train.x)
+# model_name = 'distmult'
+# rgcn = RGCNEncoder(num_nodes, num_relations, num_layer, emb_dim, num_blocks, dropout)
+# predictor = LinkPredictor(model_name, num_relations, emb_dim, out_dim, num_layer, dropout)
 
-a = RGCNEncoder(num_nodes, len(data.edge_types), num_layers = 2, emb_dim = 32)
-a(rgcn_test.x.long(), rgcn_test.edge_index.long(), rgcn_test.edge_type.long())
+# models = (rgcn, predictor)
 
-
-node_embed = NodeEmbedding(hidden_channels)
-gnn = HeteroGNN(num_relations, num_blocks, hidden_channels, num_layer, dropout)
-predictor = LinkPredictor(hidden_channels, out_channels, num_layer, dropout)
+# param_groups = []
+# param_groups.append({'params': rgcn.parameters()})
+# param_groups.append({'params': predictor.parameters()})
+# optimizer = optim.Adam(param_groups, lr = 0.001)
 
 
-criterion = nn.BCELoss()
-models = (node_embed, gnn, predictor)
+# epochs = 100
+# train_loss = []
+# best_val_auc, final_test_auc = 0, 0
 
-param_groups = []
-param_groups.append({'params': node_embed.parameters()})
-param_groups.append({'params': gnn.parameters()})
-param_groups.append({'params': predictor.parameters()})
-optimizer = optim.Adam(param_groups, lr = 0.001)
-
-train(models, optimizer, criterion, test_data, batch_size = 64)
-
-
-
-
-
-
-
-#%%
-# Link 의 개수에 대한 분석  
-# (inference score 가 붙은것 개수, 
-# direct cause 가 붙은것 개수, C-D  에 대해서, 혹시 다른 연결관계 알 수 있는 것 있는지 확인) , 
-# 연결 가능한 링크중에서 몇 개가 연결되어 있는지 비율
-
-# - Direct cause 링크가 많이 붙어 있는 Disease
-# - Inference score 의 합, 최대값 등이 큰 Disease 
-
-import torch_geometric
-import matplotlib.pyplot as plt
+# for epoch in range(1, epochs+1):
+#     _train_loss = train(models, optimizer, rgcn_train)
+#     train_loss.append(_train_loss)
+    
+#     val_loss, val_auc = evaluation(models, rgcn_valid)
+#     test_loss, test_auc = evaluation(models, rgcn_test)
+    
+#     if val_auc > best_val_auc:
+#         best_val_auc = val_auc
+#         final_test_auc = test_auc
+        
+#         rgcn_params = deepcopy(models[0].state_dict())
+#         link_perd_params = deepcopy(models[1].state_dict())
+    
+#     print(f'=== epoch {epoch} ===')
+#     print(f'train loss: {_train_loss:.3f}, validation loss: {val_loss:.3f}, test loss: {test_loss:.3f}')
+#     print(f'validation auc: {val_auc:.3f}, test auc: {test_auc:.3f}')
 
 
-
-# direct cause
-dir_row, dir_col = data[('chemical', 'cause', 'disease')].edge_index
-dir_chem_degree = torch_geometric.utils.degree(dir_row)
-dir_chem_topk_degree_idx = torch.argsort(dir_chem_degree)[-1] # top k chemical id
-
-dir_chem_degree[dir_chem_topk_degree_idx]
-
-list(chem_map.keys())[dir_chem_topk_degree_idx]
-# [list(chem_map.keys())[i] for i in dir_chem_topk_degree_idx]
-
-chem_dis_tmp[chem_dis_tmp.ChemicalID == 'D003042']
-direct_chem_dis[direct_chem_dis.ChemicalID == dir_chem_topk_degree_idx.item()]
-
-#
-dir_dis_degree = torch_geometric.utils.degree(dir_col)
-dir_dis_topk_degree_idx = torch.argsort(dir_dis_degree)[-1] # top k chemical id
-
-dir_dis_degree[dir_dis_topk_degree_idx]
-
-list(dis_map.keys())[dir_dis_topk_degree_idx]
-# [list(dis_map.keys())[i] for i in dir_dis_topk_degree_idx]
-
-chem_dis_tmp[chem_dis_tmp.DiseaseID == 'MESH:D056486']
+# #%%
+# plt.figure(figsize = (7, 5))
+# plt.plot(torch.stack(train_loss).detach().numpy())
+# plt.show()
+# plt.close()
 
 
-# inferred relation
-rel_row, rel_col = data[('chemical', 'relate', 'disease')].edge_index
-rel_chem_degree = torch_geometric.utils.degree(rel_row)
-rel_chem_topk_degree_idx = torch.argsort(rel_chem_degree)[-1]
-
-rel_chem_degree[rel_chem_topk_degree_idx]
-list(chem_map.keys())[rel_chem_topk_degree_idx]
-# [list(chem_map.keys())[i] for i in rel_chem_topk_degree_idx]
-
-chem_dis_tmp[chem_dis_tmp.ChemicalID == 'C006780']
-
-#
-rel_dis_degree = torch_geometric.utils.degree(rel_col)
-rel_dis_topk_degree_idx = torch.argsort(rel_dis_degree)[-1] # top k chemical id
-
-rel_dis_degree[rel_dis_topk_degree_idx]
-
-list(dis_map.keys())[rel_dis_topk_degree_idx]
-# [list(dis_map.keys())[i] for i in dir_dis_topk_degree_idx]
-
-chem_dis_tmp[chem_dis_tmp.DiseaseID == 'MESH:D001943']
+# #%%
+# torch.save(rgcn_params, f'saved_model/{model_name}_rgcn.pth')
+# torch.save(link_perd_params, f'saved_model/{model_name}_link_pred.pth')
 
 
-a = chem_dis_tmp.groupby(['DiseaseID'])['InferenceScore'].sum()
-a[a == a.max()]
-chem_dis_tmp[chem_dis_tmp.DiseaseID == 'MESH:D008106']
-chem_dis_tmp[chem_dis_tmp.DiseaseID == 'MESH:D008106'].InferenceScore.sum()
+# #%%
+# # rgcn.load_state_dict(rgcn_params)
+# rgcn.load_state_dict(torch.load(f'saved_model/{model_name}_rgcn.pth'))
+# rgcn.eval()
 
-b = chem_dis_tmp.groupby(['DiseaseID'])['InferenceScore'].max()
-b[b == b.max()]
-chem_dis_tmp[chem_dis_tmp.DiseaseID == 'MESH:D008106']
-
-
-# %%
-chem_dis_tmp.DirectEvidence.unique()
-
-chem_dis_tmp.InferenceScore.max()
-chem_dis_tmp.InferenceScore.min()
-chem_dis_tmp.InferenceScore.median()
-chem_dis_tmp.InferenceScore.mean()
-chem_dis_tmp.InferenceScore.std()
-
-plt.style.use('bmh')
-
-fig = plt.figure(figsize = (14, 5))
-ax1 = fig.add_subplot(1, 2, 1)
-ax2 = fig.add_subplot(1, 2, 2)
-
-ax1.hist(chem_dis_tmp.InferenceScore, bins = 100, density = True, color = 'maroon')
-ax1.set_xlabel('Inference Score')
-
-ax2.hist(chem_dis_tmp.InferenceScore[chem_dis_tmp.InferenceScore <= 100], bins = 100, density = True, color = 'maroon')
-ax2.set_xlabel('Inference Score')
-
-plt.show()
-plt.close()
-
-
-chem_dis_tmp.DirectEvidence.value_counts()
-a = chem_dis_tmp[chem_dis_tmp.DirectEvidence.notna()]
-a[a.duplicated(['ChemicalID', 'DiseaseID'])]
-
-a[a.ChemicalID == 'C020549']
-
-chem_dis_tmp[chem_dis_tmp.DirectEvidence.notna()].drop_duplicates(['ChemicalID', 'DiseaseID'])
-chem_dis_tmp[chem_dis_tmp.DirectEvidence.notna()].InferenceScore.notna().sum()
+# # predictor.load_state_dict(link_perd_params)
+# predictor.load_state_dict(torch.load(f'saved_model/{model_name}_link_pred.pth'))
+# rgcn.eval()

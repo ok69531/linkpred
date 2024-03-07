@@ -1,6 +1,7 @@
 # https://github.com/pyg-team/pytorch_geometric/blob/master/examples/hetero/hetero_link_pred.py
 # https://pytorch-geometric.readthedocs.io/en/latest/notes/heterogeneous.html#hgtutorial
 # https://medium.com/@pytorch_geometric/link-prediction-on-heterogeneous-graphs-with-pyg-6d5c29677c70
+# https://www.kaggle.com/code/nadergo/link-prediction-on-a-heterogeneous-graph
 
 #%%
 import numpy as np
