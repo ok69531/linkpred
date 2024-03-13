@@ -9,6 +9,7 @@ from torch_geometric.data import Data
 
 dataset = torch.load('../dataset/homo_ctd_graph.pt')
 num_nodes = dataset.num_nodes
+# num_relations = 1
 num_relations = int(dataset.edge_type.max()) + 1
 edge_index = dataset.edge_index[:, dataset.train_mask]
 edge_type = dataset.edge_type[dataset.train_mask]
@@ -890,13 +891,6 @@ from torch_geometric.data import Data
 separator = ">" * 30
 line = "-" * 30
 
-train_batch_size = 16
-num_epoch = 20
-num_negative = train_batch_size
-adversarial_temperature = 0.5
-log_interval = 100
-metrics = ['mr', 'mrr', 'hits@1', 'hits@3', 'hits@10']
-
 
 def train_and_validate(model, train_data, valid_data, filtered_data=None):
 
@@ -1070,7 +1064,16 @@ is_inductive = False
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-model = NBFNet(input_dim = 16, hidden_dims = [16, 16, 16], num_relation = num_relations, 
+
+train_batch_size = 64
+num_epoch = 20
+num_negative = train_batch_size
+adversarial_temperature = 0.5
+log_interval = 100
+metrics = ['mr', 'mrr', 'hits@1', 'hits@3', 'hits@10']
+
+
+model = NBFNet(input_dim = 32, hidden_dims = [32, 32, 32], num_relation = num_relations, 
                message_func = 'distmult', aggregate_func = 'pna', short_cut = 'yes', layer_norm = 'yes',
                dependent = 'yes', remove_one_hop = 'yes')
 model = model.to(device)
@@ -1096,3 +1099,160 @@ if get_rank() == 0:
     logger.warning("Evaluate on test")
 test(model, test_data, filtered_data=filtered_data)
 
+
+#%%
+model.eval()
+
+world_size = get_world_size()
+rank = get_rank()
+
+test_triplets = torch.cat([test_data.target_edge_index, test_data.target_edge_type.unsqueeze(0)]).t()
+sampler = torch_data.DistributedSampler(test_triplets, world_size, rank)
+test_loader = torch_data.DataLoader(test_triplets, train_batch_size, sampler=sampler)
+# len(test_triplets)
+
+def area_under_roc(pred, target):
+    """
+    Area under receiver operating characteristic curve (ROC).
+
+    Parameters:
+        pred (Tensor): predictions of shape :math:`(n,)`
+        target (Tensor): binary targets of shape :math:`(n,)`
+    """
+    order = pred.flatten().argsort(descending=True)
+    target = target.flatten()[order]
+    hit = target.cumsum(0)
+    all = (target == 0).sum() * (target == 1).sum()
+    auroc = hit[target == 0].sum() / (all + 1e-10)
+    return auroc
+
+auc = []
+for batch in test_loader:
+    batch = negative_sampling(test_data, batch, num_negative, strict=True)
+    pred = model(test_data, batch)
+    target = torch.zeros_like(pred)
+    target[:, 0] = 1
+    auc.append(area_under_roc(pred.flatten(), target.flatten()))
+    
+
+
+
+# %%
+''' visualize '''
+import os
+import sys
+import pprint
+
+import torch
+from torch_geometric.data import Data
+
+model.load_state_dict(torch.load('model_epoch_20.pth')['model'])
+model.eval()
+
+vocab_file = torch.load('../dataset/cgd_entity.pt')
+rel_file = torch.load('../dataset/cgd_edge_type.pt')
+
+entity_vocab = list(vocab_file.keys())
+relation_vocab = list(rel_file.keys())
+# relation_vocab = [list(rel_file.keys())[i] for i in dataset.edge_type]
+
+
+
+# def load_vocab(dataset):
+#     entity_mapping = {}
+#     with open(vocab_file, "r") as fin:
+#         for line in fin:
+#             k, v = line.strip().split("\t")
+#             entity_mapping[k] = v
+#     entity_vocab = []
+#     with open(os.path.join(dataset.raw_dir, "entities.dict"), "r") as fin:
+#         for line in fin:
+#             id, e_token = line.strip().split("\t")
+#             entity_vocab.append(entity_mapping[e_token])
+#     relation_vocab = []
+#     with open(os.path.join(dataset.raw_dir, "relations.dict"), "r") as fin:
+#         for line in fin:
+#             id, r_token = line.strip().split("\t")
+#             relation_vocab.append("%s (%s)" % (r_token[r_token.rfind("/") + 1:].replace("_", " "), id))
+
+#     return entity_vocab, relation_vocab
+
+# triplet = test_triplets[0]
+def visualize_path(model, test_data, triplet, entity_vocab, relation_vocab, filtered_data=None):
+    # num_relation = 1
+    num_relation = len(relation_vocab)
+    triplet = triplet.unsqueeze(0)
+    inverse = triplet[:, [1, 0, 2]]
+    # inverse[:, 2] += 1
+    inverse[:, 2] += num_relation
+    model.eval()
+    t_batch, h_batch = all_negative(test_data, triplet)
+    t_pred = model(test_data, t_batch)
+    h_pred = model(test_data, h_batch)
+
+    if filtered_data is None:
+        t_mask, h_mask = strict_negative_mask(test_data, triplet)
+    else:
+        t_mask, h_mask = strict_negative_mask(filtered_data, triplet)
+    pos_h_index, pos_t_index, pos_r_index = triplet.unbind(-1)
+    t_ranking = compute_ranking(t_pred, pos_t_index, t_mask).squeeze(0)
+    h_ranking = compute_ranking(h_pred, pos_h_index, h_mask).squeeze(0)
+
+    logger.warning("")
+    samples = (triplet, inverse)
+    rankings = (t_ranking, h_ranking)
+    for sample, ranking in zip(samples, rankings):
+        h, t, r = sample.squeeze(0).tolist()
+        h_name = entity_vocab[h]
+        t_name = entity_vocab[t]
+        r_name = relation_vocab[r % num_relation]
+        if r >= num_relation:
+            r_name += "^(-1)"
+        logger.warning(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+        logger.warning("rank(%s | %s, %s) = %g" % (t_name, h_name, r_name, ranking))
+
+        paths, weights = model.visualize(test_data, sample)
+        for path, weight in zip(paths, weights):
+            triplets = []
+            for h, t, r in path:
+                h_name = entity_vocab[h]
+                t_name = entity_vocab[t]
+                r_name = relation_vocab[r % num_relation]
+                if r >= num_relation:
+                    r_name += "^(-1)"
+                triplets.append("<%s, %s, %s>" % (h_name, r_name, t_name))
+            logger.warning("weight: %g\n\t%s" % (weight, " ->\n\t".join(triplets)))
+
+
+if __name__ == "__main__":
+    # working_dir = create_working_directory(cfg)
+
+    torch.manual_seed(seed + get_rank())
+
+    logger = get_root_logger()
+    # logger.warning("Config file: %s" % args.config)
+    # logger.warning(pprint.pformat(cfg))
+
+    # if cfg.dataset["class"] != "FB15k-237":
+    #     raise ValueError("Visualization is only implemented for FB15k237")
+
+    # dataset = util.build_dataset(cfg)
+    # cfg.model.num_relation = dataset.num_relations
+    # model = util.build_model(cfg)
+    # entity_vocab, relation_vocab = load_vocab(dataset)
+
+    # device = util.get_device(cfg)
+    model = model.to(device)
+    # train_data, valid_data, test_data = dataset[0], dataset[1], dataset[2]
+    # train_data = train_data.to(device)
+    # valid_data = valid_data.to(device)
+    # test_data = test_data.to(device)
+    # use the whole dataset for filtered ranking
+    filtered_data = Data(edge_index=train_data.target_edge_index, edge_type=train_data.target_edge_type)
+    filtered_data = filtered_data.to(device)
+
+    test_triplets = torch.cat([test_data.target_edge_index, test_data.target_edge_type.unsqueeze(0)]).t()
+    for i in range(47):
+        visualize_path(model, test_data, test_triplets[i], entity_vocab, relation_vocab, filtered_data=filtered_data)
+
+# %%
