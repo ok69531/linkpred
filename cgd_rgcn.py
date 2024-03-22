@@ -1,5 +1,6 @@
 #%%
 import random
+from copy import deepcopy
 
 import torch
 from torch import nn, optim
@@ -17,7 +18,9 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 #%%
 ''' train/validation/test data split '''
-dataset = torch.load('dataset/homo_ctd_graph.pt')
+dataset = torch.load('dataset/all_homo_cd_graph.pt')
+# dataset = torch.load('dataset/homo_cd_graph.pt')
+# dataset = torch.load('dataset/homo_ctd_graph.pt')
 
 ### masking 생성
 num_edges = dataset.edge_index.shape[1]
@@ -126,6 +129,21 @@ class MLPLinkPredictor(nn.Module):
         return score
 
 
+class DistMultDecoder(torch.nn.Module):
+    def __init__(self, num_relations, hidden_channels):
+        super().__init__()
+        self.rel_emb = nn.Parameter(torch.empty(num_relations, hidden_channels))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        torch.nn.init.xavier_uniform_(self.rel_emb)
+
+    def forward(self, z, edge_index, edge_type):
+        z_src, z_dst = z[edge_index[0]], z[edge_index[1]]
+        rel = self.rel_emb[edge_type]
+        return torch.sum(z_src * rel * z_dst, dim=1)
+
+
 #%%
 def negative_sampling(edge_index, num_nodes):
     # Sample edges by corrupting either the subject or the object of each edge.
@@ -140,23 +158,40 @@ def negative_sampling(edge_index, num_nodes):
 # negative_sampling(test_data.target_edge_index, dataset.num_nodes)
 
 
+def compute_loss(pos_score, neg_score):    
+    positive_score = nn.functional.logsigmoid(pos_score)
+    positive_score = -positive_score.mean()
+    
+    negative_score = nn.functional.logsigmoid(-neg_score)
+    negative_score = -negative_score.mean()
+    
+    # scores = torch.cat([pos_score, neg_score])
+    # labels = torch.cat([torch.ones(pos_score.shape[0]), torch.zeros(neg_score.shape[0])]).to(device)
+    # return F.binary_cross_entropy_with_logits(scores, labels)
+    return (positive_score + negative_score) / 2
+
+
 def train(model, optimizer, data):
     model.train()
     optimizer.zero_grad()
 
     z = model.encode(data.x, data.target_edge_index, data.target_edge_type)
 
-    src, dst = data.target_edge_index
-    pos_out = model.decode(z[src], z[dst])
+    # src, dst = data.target_edge_index
+    # pos_out = model.decode(z[src], z[dst])
+    pos_out = model.decode(z, data.target_edge_index, data.target_edge_type)
 
-    neg_src, neg_dst = negative_sampling(data.target_edge_index, data.num_nodes)
-    neg_out = model.decode(z[neg_src], z[neg_dst])
+    neg_edge_index = negative_sampling(data.target_edge_index, data.num_nodes)
+    neg_out = model.decode(z, neg_edge_index, data.target_edge_type)
+    # neg_src, neg_dst = negative_sampling(data.target_edge_index, data.num_nodes)
+    # neg_out = model.decode(z[neg_src], z[neg_dst])
 
-    out = torch.cat([pos_out, neg_out])
-    gt = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)])
-    loss = nn.functional.binary_cross_entropy_with_logits(out, gt)
-    # reg_loss = z.pow(2).mean() + model.decoder.rel_emb.pow(2).mean()
-    # loss = cross_entropy_loss + 1e-2 * reg_loss
+    # out = torch.cat([pos_out, neg_out])
+    # gt = torch.cat([torch.ones_like(pos_out), torch.zeros_like(neg_out)])
+    # loss = nn.functional.binary_cross_entropy_with_logits(out, gt)
+    loss = compute_loss(pos_out, neg_out)
+    reg_loss = z.pow(2).mean() + model.decoder.rel_emb.pow(2).mean()
+    loss = loss + 1e-2 * reg_loss
 
     loss.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
@@ -185,7 +220,7 @@ def compute_rank(ranks):
     pessimistic = (ranks >= true).sum()
     return (optimistic + pessimistic).float() * 0.5
 
-
+num_neg = 100
 @torch.no_grad()
 def compute_metric(z, edge_index, edge_type):
     ranks = []
@@ -193,38 +228,39 @@ def compute_metric(z, edge_index, edge_type):
         (src, dst), rel = edge_index[:, i], edge_type[i]
 
         # Try all nodes as tails, but delete true triplets:
-        tail = torch.tensor(random.sample(range(dataset.num_nodes), 500))
+        tail = torch.tensor(random.sample(range(dataset.num_nodes), num_neg), device = src.device)
         dst_is_in_neg = torch.where(tail == dst)[0]
         if len(dst_is_in_neg) == 0:
-            tail = torch.cat([torch.tensor([dst]), tail])
+            tail = torch.cat([torch.tensor([dst], device = src.device), tail])
         else:
             tail = torch.cat([tail[:dst_is_in_neg], tail[dst_is_in_neg+1:]])
-            add_tail = torch.randint(0, dataset.num_nodes, (1,))
-            tail = torch.cat([torch.tensor([dst]), tail, add_tail])
-    
-        head = torch.full_like(tail, fill_value=src)
-        eval_edge_index = torch.stack([head, tail], dim=0)
-        # eval_edge_type = torch.full_like(tail, fill_value=rel)
+            add_tail = torch.randint(0, dataset.num_nodes, (1,), device = src.device)
+            tail = torch.cat([torch.tensor([dst], device = src.device), tail, add_tail])
 
-        out = model.decode(z[eval_edge_index[0]], z[eval_edge_index[1]])
+        head = torch.full_like(tail, fill_value=src, device = src.device)
+        eval_edge_index = torch.stack([head, tail], dim=0)
+        eval_edge_type = torch.full_like(tail, fill_value=rel, device = src.device)
+
+        out = model.decode(z, eval_edge_index, eval_edge_type)
+        # out = model.decode(z[eval_edge_index[0]], z[eval_edge_index[1]])
         rank = compute_rank(out)
         ranks.append(rank)
 
         # Try all nodes as heads, but delete true triplets:
-        head = torch.tensor(random.sample(range(dataset.num_nodes), 500))
+        head = torch.tensor(random.sample(range(dataset.num_nodes), num_neg), device = src.device)
         src_is_in_neg = torch.where(head == src)[0]
         if len(src_is_in_neg) == 0:
-            head = torch.cat([torch.tensor([src]), head])
+            head = torch.cat([torch.tensor([src], device = src.device), head])
         else:
             head = torch.cat([head[:src_is_in_neg], head[src_is_in_neg+1:]])
-            add_head = torch.randint(0, dataset.num_nodes, (1,))
-            head = torch.cat([torch.tensor([src]), head, add_head])
+            add_head = torch.randint(0, dataset.num_nodes, (1,), device = src.device)
+            head = torch.cat([torch.tensor([src], device = src.device), head, add_head])
         
-        tail = torch.full_like(head, fill_value=dst)
+        tail = torch.full_like(head, fill_value=dst, device = src.device)
         eval_edge_index = torch.stack([head, tail], dim=0)
         # eval_edge_type = torch.full_like(head, fill_value=rel)
 
-        out = model.decode(z[eval_edge_index[0]], z[eval_edge_index[1]])
+        out = model.decode(z, eval_edge_index, eval_edge_type)
         rank = compute_rank(out)
         ranks.append(rank)
 
@@ -236,87 +272,51 @@ def compute_metric(z, edge_index, edge_type):
     return mrr, hits1, hits3, hits10
 
 
-
-# @torch.no_grad()
-# def compute_metric(z, edge_index, edge_type):
-#     ranks = []
-#     for i in range(edge_type.numel()):
-#         (src, dst), rel = edge_index[:, i], edge_type[i]
-
-#         # Try all nodes as tails, but delete true triplets:
-#         tail_mask = torch.ones(dataset.num_nodes, dtype=torch.bool)
-#         for (heads, tails), types in [
-#             (train_data.target_edge_index, train_data.target_edge_type),
-#             (valid_data.target_edge_index, valid_data.target_edge_type),
-#             (test_data.target_edge_index, test_data.target_edge_type),
-#         ]:
-#             tail_mask[tails[(heads == src) & (types == rel)]] = False
-
-#         tail = torch.arange(dataset.num_nodes)[tail_mask]
-#         tail = torch.cat([torch.tensor([dst]), tail])
-#         head = torch.full_like(tail, fill_value=src)
-#         eval_edge_index = torch.stack([head, tail], dim=0)
-#         eval_edge_type = torch.full_like(tail, fill_value=rel)
-
-#         out = model.decode(z[eval_edge_index[0]], z[eval_edge_index[1]])
-#         rank = compute_rank(out)
-#         ranks.append(rank)
-
-#         # Try all nodes as heads, but delete true triplets:
-#         head_mask = torch.ones(dataset.num_nodes, dtype=torch.bool)
-#         for (heads, tails), types in [
-#             (train_data.target_edge_index, train_data.target_edge_type),
-#             (valid_data.target_edge_index, valid_data.target_edge_type),
-#             (test_data.target_edge_index, test_data.target_edge_type),
-#         ]:
-#             head_mask[heads[(tails == dst) & (types == rel)]] = False
-
-#         head = torch.arange(dataset.num_nodes)[head_mask]
-#         head = torch.cat([torch.tensor([src]), head])
-#         tail = torch.full_like(head, fill_value=dst)
-#         eval_edge_index = torch.stack([head, tail], dim=0)
-#         eval_edge_type = torch.full_like(head, fill_value=rel)
-
-#         out = model.decode(z[eval_edge_index[0]], z[eval_edge_index[1]])
-#         rank = compute_rank(out)
-#         ranks.append(rank)
-
-#     mrr = (1. / torch.tensor(ranks, dtype=torch.float)).mean()
-#     hits1 = (torch.tensor(ranks) <= 1).to(torch.float32).mean()
-#     hits3 = (torch.tensor(ranks) <= 3).to(torch.float32).mean()
-#     hits10 = (torch.tensor(ranks) <= 10).to(torch.float32).mean()
-    
-#     return mrr, hits1, hits3, hits10
-
-
-
 #%%
 torch.manual_seed(seed)
 torch_geometric.seed_everything(seed)
 
-emb_dim = 16
+emb_dim = 32
 
 model = GAE(
-    RGCNet(num_node = dataset.num_nodes, num_relation = dataset.num_relations*2, emb_dim = emb_dim),
-    MLPLinkPredictor(emb_dim, 1)
+    RGCNet(num_node = dataset.num_nodes, num_relation = num_relations, emb_dim = emb_dim),
+    DistMultDecoder(num_relations, emb_dim)
+    # MLPLinkPredictor(emb_dim, 1)
 ).to(device)
-optimizer = optim. Adam(model.parameters(), lr = 0.001)
+optimizer = optim. Adam(model.parameters(), lr = 0.005)
 
+train_data = train_data.to(device)
+valid_data = valid_data.to(device)
+test_data = test_data.to(device)
 
 train_loss = []
-for epoch in range(1, 101):
+# best_valid_mrr = 0; final_test_mrr = 0
+epochs = 300
+for epoch in range(1, epochs + 1):
     loss = train(model, optimizer, train_data)
     train_loss.append(loss)
     
-    
-    valid_mrr, valid_hits1, valid_hits3, valid_hits10 = evaluation(model, valid_data)
-    test_mrr, test_hits1, test_hits3, test_hits10 = evaluation(model, test_data)
-    
     print(f'Epoch: {epoch:05d}, Loss: {loss:.4f}')
-    print(f'Val MRR: {valid_mrr:.3f}, Test MRR: {test_mrr:.3f}')
-    print(f'Val Hits@1: {valid_hits1:.3f}, Test Hits@1: {test_hits1:.3f}')
-    print(f'Val Hits@3: {valid_hits3:.3f}, Test Hits@3: {test_hits3:.3f}')
-    print(f'Val Hits@10: {valid_hits10:.3f}, Test Hits@10: {test_hits10:.3f}')
+    
+    
+    # if valid_mrr > best_valid_mrr:
+    #     best_valid_mrr = valid_mrr
+    #     model_params = deepcopy(model.state_dict())
+    
+    if epoch % 10 == 0:
+        valid_mrr, valid_hits1, valid_hits3, valid_hits10 = evaluation(model, valid_data)
+        test_mrr, test_hits1, test_hits3, test_hits10 = evaluation(model, test_data)
+        
+        print(f'Val MRR: {valid_mrr:.3f}, Test MRR: {test_mrr:.3f}')
+        print(f'Val Hits@1: {valid_hits1:.3f}, Test Hits@1: {test_hits1:.3f}')
+        print(f'Val Hits@3: {valid_hits3:.3f}, Test Hits@3: {test_hits3:.3f}')
+        print(f'Val Hits@10: {valid_hits10:.3f}, Test Hits@10: {test_hits10:.3f}')
+    
+model_params = deepcopy(model.state_dict())
 
 
 #%%
+model.load_state_dict(model_params)
+
+valid_mrr, valid_hits1, valid_hits3, valid_hits10 = evaluation(model, valid_data)
+test_mrr, test_hits1, test_hits3, test_hits10 = evaluation(model, test_data)
